@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Digital Fortress V2</title>
+
+  <style>
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Arial, sans-serif;
+      background: #0b1220;
+      color: #d1d5db;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      height: 100vh;
+    }
+
+    .container {
+      width: 420px;
+      background: #111827;
+      padding: 24px;
+      border-radius: 12px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+    }
+
+    h2 {
+      text-align: center;
+      margin-bottom: 18px;
+      font-weight: 600;
+      letter-spacing: 1px;
+      color: #f9fafb;
+    }
+
+    .id-box {
+      background: #020617;
+      padding: 10px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 15px;
+      text-align: center;
+      word-break: break-all;
+      border: 1px solid #1f2937;
+    }
+
+    input, button {
+      width: 100%;
+      margin-top: 10px;
+      padding: 10px;
+      border-radius: 6px;
+      border: 1px solid #1f2937;
+      font-size: 14px;
+      box-sizing: border-box;
+    }
+
+    input {
+      background: #020617;
+      color: #e5e7eb;
+    }
+
+    input::placeholder {
+      color: #6b7280;
+    }
+
+    button {
+      background: #2563eb;
+      color: #ffffff;
+      cursor: pointer;
+      transition: background 0.2s ease;
+      border: none;
+      font-weight: 500;
+    }
+
+    button:hover {
+      background: #1d4ed8;
+    }
+
+    .file-box {
+      margin-top: 10px;
+      padding: 10px;
+      background: #020617;
+      border-radius: 6px;
+      font-size: 13px;
+      border: 1px solid #1f2937;
+    }
+
+    progress {
+      width: 100%;
+      height: 6px;
+      margin-top: 15px;
+      appearance: none;
+    }
+
+    progress::-webkit-progress-bar {
+      background: #020617;
+      border-radius: 4px;
+    }
+
+    progress::-webkit-progress-value {
+      background: #2563eb;
+      border-radius: 4px;
+    }
+
+    .footer {
+      text-align: center;
+      font-size: 12px;
+      margin-top: 15px;
+      color: #6b7280;
+      letter-spacing: 0.5px;
+    }
+  </style>
+</head>
+
+<body>
+
+<div class="container">
+
+  <h2>DIGITAL FORTRESS V2</h2>
+
+  <div class="id-box">
+    Your ID:<br>
+    <b id="myId">Connecting...</b>
+  </div>
+
+  <input id="targetId" placeholder="Enter recipient ID">
+
+  <input type="file" id="fileInput">
+
+  <div class="file-box" id="fileInfo">No file selected</div>
+
+  <button onclick="startConnection()">Send File</button>
+
+  <progress id="progress" value="0" max="100"></progress>
+
+  <div class="footer">
+    Direct Transfer • Peer-to-Peer • No Server Storage
+  </div>
+
+</div>
+
+<script>
+let ws = new WebSocket("ws://localhost:3000");
+let pc = new RTCPeerConnection();
+let channel;
+let myId;
+
+const fileInput = document.getElementById("fileInput");
+const fileInfo = document.getElementById("fileInfo");
+
+fileInput.onchange = () => {
+  let file = fileInput.files[0];
+  if (file) {
+    fileInfo.innerText = file.name + " (" + (file.size / (1024*1024)).toFixed(2) + " MB)";
+  }
+};
+
+ws.onmessage = async (msg) => {
+  let data = JSON.parse(msg.data);
+
+  if (data.type === "id") {
+    myId = data.id;
+    document.getElementById("myId").innerText = myId;
+  }
+
+  if (data.offer) {
+    await pc.setRemoteDescription(data.offer);
+    let answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+
+    ws.send(JSON.stringify({
+      target: data.sender,
+      answer: pc.localDescription
+    }));
+  }
+
+  if (data.answer) {
+    await pc.setRemoteDescription(data.answer);
+  }
+
+  if (data.candidate) {
+    await pc.addIceCandidate(data.candidate);
+  }
+};
+
+pc.onicecandidate = (e) => {
+  if (e.candidate) {
+    ws.send(JSON.stringify({
+      target: document.getElementById("targetId").value,
+      candidate: e.candidate
+    }));
+  }
+};
+
+pc.ondatachannel = (e) => {
+  receiveFile(e.channel);
+};
+
+function startConnection() {
+  if (!fileInput.files[0]) {
+    alert("Please select a file first.");
+    return;
+  }
+
+  channel = pc.createDataChannel("file");
+  sendFile(channel);
+
+  pc.createOffer().then(o => pc.setLocalDescription(o));
+
+  pc.onicecandidate = (e) => {
+    if (e.candidate) {
+      ws.send(JSON.stringify({
+        target: document.getElementById("targetId").value,
+        offer: pc.localDescription
+      }));
+    }
+  };
+}
+
+function sendFile(channel) {
+  channel.onopen = () => {
+    let file = fileInput.files[0];
+    const chunkSize = 256 * 1024;
+    let offset = 0;
+
+    function sendChunk() {
+      let slice = file.slice(offset, offset + chunkSize);
+      let reader = new FileReader();
+
+      reader.onload = e => {
+        channel.send(e.target.result);
+        offset += chunkSize;
+
+        progress.value = (offset / file.size) * 100;
+
+        if (offset < file.size) {
+          sendChunk();
+        } else {
+          channel.send("EOF");
+        }
+      };
+
+      reader.readAsArrayBuffer(slice);
+    }
+
+    sendChunk();
+  };
+}
+
+function receiveFile(channel) {
+  let chunks = [];
+
+  channel.onmessage = (e) => {
+    if (e.data === "EOF") {
+      let blob = new Blob(chunks);
+      let a = document.createElement("a");
+      a.href = URL.createObjectURL(blob);
+      a.download = "received_file";
+      a.click();
+    } else {
+      chunks.push(e.data);
+    }
+  };
+}
+</script>
+
+</body>
+</html>
